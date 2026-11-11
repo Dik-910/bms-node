@@ -79,8 +79,11 @@ docs/        设计文档
 
 ## 通信协议
 
-报文定义见 [can-node/docs/protocol.md](https://github.com/Dik-910/can-node/blob/main/docs/protocol.md)。
-本节点发送 `0x200`（采样数据）与 `0x280`（故障事件）。
+报文定义统一维护在 [can-node/docs/can_matrix.dbc](https://github.com/Dik-910/can-node/blob/main/docs/can_matrix.dbc)，
+说明见 [protocol.md](https://github.com/Dik-910/can-node/blob/main/docs/protocol.md)。
+
+本节点发送 `0x200`（采样数据，周期 50 ms）与 `0x280`（故障事件，状态迁移时触发）。
+DBC 为唯一权威来源，本地不单独维护副本。
 
 ## 构建
 
