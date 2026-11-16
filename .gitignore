@@ -1,30 +1,6 @@
-# 编译产物
+# 构建产物
 *.o
-*.d
-*.elf
-*.bin
-*.hex
-*.map
-*.lst
-*.su
-build/
-Debug/
-Release/
-output/
-
-# STM32CubeIDE / CubeMX（*.ioc 要入库，别忽略）
-.settings/
-.project
-.cproject
-.mxproject
-*.launch
-
-# 编辑器
-.vscode/
-.idea/
-*.swp
-*~
-
-# 系统
-.DS_Store
-Thumbs.db
+/node
+/test/bms_filter_test
+/test/bms_soc_test
+/test/bms_protect_test

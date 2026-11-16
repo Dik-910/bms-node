@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: make
+
+      - name: Unit tests
+        run: make test
+
+      # 单元测试全过但有警告，说明有隐患被忽略
+      - name: Strict rebuild (-Werror)
+        run: |
+          make clean
+          make CFLAGS="-std=c99 -Wall -Wextra -Werror -I. -Isrc/bms -Isrc/can -Isrc/can/generated -Isrc/net -Isrc/uds -Isrc/app"
+
+      # 真实跑一遍完整生命周期，检查状态迁移是否按设计走
+      - name: Run node on vcan
+        run: |
+          sudo modprobe vcan
+          sudo ip link add dev vcan0 type vcan
+          sudo ip link set up vcan0
+
+          make node
+          ./node --if vcan0 --seconds 27 > /tmp/bms.log 2>&1 || true
+          cat /tmp/bms.log
+
+          # 必须真的跑完了完整生命周期
+          grep -q "state 0 -> 1" /tmp/bms.log        # 正常 -> 告警
+          grep -q "state 1 -> 2" /tmp/bms.log        # 告警 -> 保护
+          grep -q "state 2 -> 3" /tmp/bms.log        # 保护 -> 恢复
+          grep -q "state 3 -> 0" /tmp/bms.log        # 恢复 -> 正常
+          # 保护期间继电器必须断开
+          grep -q "state 1 -> 2  faults=0x0101 relay=OPEN" /tmp/bms.log
+          # OCV 修正必须发生过
+          grep -qE "corr=[1-9]" /tmp/bms.log
+          echo "full lifecycle verified"
+
+      - name: Verify CAN frames on the bus
+        run: |
+          ./node --if vcan0 --seconds 5 > /tmp/bms2.log 2>&1 &
+          NODE=$!
+          sleep 1
+          timeout 3 candump -n 3 vcan0 > /tmp/can.log 2>&1 || true
+          kill -INT $NODE 2>/dev/null; wait $NODE 2>/dev/null || true
+
+          cat /tmp/can.log
+          # 必须看到 0x200 且 DLC=8
+          grep -q "200   \[8\]" /tmp/can.log
+          echo "can uplink verified"
