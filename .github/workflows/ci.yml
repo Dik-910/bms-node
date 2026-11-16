@@ -12,6 +12,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install can-utils
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq can-utils
+
       - name: Build
         run: make
 
@@ -56,5 +61,5 @@ jobs:
 
           cat /tmp/can.log
           # 必须看到 0x200 且 DLC=8
-          grep -q "200   \[8\]" /tmp/can.log
+          grep -qE "200 +\[8\]" /tmp/can.log
           echo "can uplink verified"
