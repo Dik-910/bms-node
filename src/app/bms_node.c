@@ -22,6 +22,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "bms_dtc.h"
 #include "bms_filter.h"
 #include "bms_protect.h"
 #include "bms_soc.h"
@@ -30,6 +31,7 @@
 #include "can_driver.h"
 #include "can_driver_socketcan.h"
 #include "can_matrix.h"
+#include "dtc.h"
 #include "isotp.h"
 #include "uds.h"
 
@@ -51,6 +53,55 @@ static bms_sample_t g_filt;     /* 滤波后，用于上报与展示 */
 static bms_chan_t g_ch_mv, g_ch_ma, g_ch_tc;
 
 static const uint8_t g_vin[17] = "LSVBM1234567890A";
+
+/* ---------- 故障码 ---------- */
+
+/* 码表与映射在 bms_dtc.c，见那里的注释（为什么只记保护级、为什么单独一层） */
+
+/* 故障存储器。放在文件作用域而不是 uds_server_t 里：它要跨复位保持 */
+static dtc_store_t g_dtcs;
+
+/*
+ * 快照内容：包压 4 + 电流 4 + 温度 2 + SOC 2 + 保护状态 1 = 13 字节。
+ * 用**原始采样**而不是滤波值 —— 滤波会把故障瞬间的峰值抹平，
+ * 事后看快照会以为「当时只到 46000」，实际冲到过 48000。
+ */
+#define SNAPSHOT_LEN 13
+
+static int snapshot_provider(uint32_t code, uint8_t *out, uint8_t max_len)
+{
+    int32_t soc;
+    uint32_t mv = g_raw.pack_mv;
+    int32_t ma = g_raw.current_ma;
+    int16_t dc = g_raw.temp_dc;
+
+    (void)code;
+
+    if (max_len < SNAPSHOT_LEN)
+        return 0;
+
+    soc = bms_soc_get(&g_soc);
+
+    out[0] = (uint8_t)(mv >> 24);
+    out[1] = (uint8_t)((mv >> 16) & 0xFF);
+    out[2] = (uint8_t)((mv >> 8) & 0xFF);
+    out[3] = (uint8_t)(mv & 0xFF);
+
+    out[4] = (uint8_t)((ma >> 24) & 0xFF);
+    out[5] = (uint8_t)((ma >> 16) & 0xFF);
+    out[6] = (uint8_t)((ma >> 8) & 0xFF);
+    out[7] = (uint8_t)(ma & 0xFF);
+
+    out[8] = (uint8_t)((dc >> 8) & 0xFF);
+    out[9] = (uint8_t)(dc & 0xFF);
+
+    out[10] = (uint8_t)((soc >> 8) & 0xFF);
+    out[11] = (uint8_t)(soc & 0xFF);
+
+    out[12] = (uint8_t)bms_prot_state(&g_prot);
+
+    return SNAPSHOT_LEN;
+}
 
 /* ---------- 采样场景 ---------- */
 
@@ -185,6 +236,20 @@ static int read_faults(uint8_t *out, uint8_t *len)
 }
 
 /*
+ * 已确认故障条数。
+ *
+ * g_prot.faults 是「此刻有没有越限」，掉下来就没了；这个数是「历史上一共
+ * 确认过几笔」，只有清码或老化才会减少。上位机做健康度统计读这个，
+ * 读 0x19 要组一整个多帧请求，不值得放在周期采集里。
+ */
+static int read_dtc_count(uint8_t *out, uint8_t *len)
+{
+    out[0] = (uint8_t)dtc_count_by_mask(&g_dtcs, DTC_STATUS_CONFIRMED);
+    *len = 1;
+    return 0;
+}
+
+/*
  * 保护阈值可写。演示「0x2E 写参数需要先解锁」这条链路，
  * 真实项目里这个值要落 Flash，本版本只改内存（掉电丢失）。
  */
@@ -231,6 +296,7 @@ static const uds_did_entry_t g_dids[] =
     {0x0104, 0, 0, read_soc,         0, UDS_SESSION_DEFAULT, 0},
     {0x0105, 0, 0, read_prot_state,  0, UDS_SESSION_DEFAULT, 0},
     {0x0106, 0, 0, read_faults,      0, UDS_SESSION_DEFAULT, 0},
+    {0x0107, 0, 0, read_dtc_count,   0, UDS_SESSION_DEFAULT, 0},
     {0x0201, 0, 0, read_ov_threshold, write_ov_threshold,
      UDS_SESSION_EXTENDED, 1},
 };
@@ -262,7 +328,9 @@ int main(int argc, char **argv)
     can_socketcan_t sk;
     can_driver_t can;
     isotp_t tp;
-    isotp_config_t icfg = {ID_RESPONSE, ID_REQUEST, 8, 10, 0};
+    /* 前三项必须显式写死：块大小 0（不分块）、STmin 0、不填充。
+       后两个超时用 0 表示默认值（N_Bs = 1000ms / N_Cr = 1000ms） */
+    isotp_config_t icfg = {ID_RESPONSE, ID_REQUEST, 8, 10, 0, 0, 0};
     uds_server_t srv;
     uds_config_t ucfg;
     bms_soc_cfg_t scfg;
@@ -297,9 +365,32 @@ int main(int argc, char **argv)
 
     isotp_init(&tp, &icfg);
 
+    /* ---- 故障存储器（必须在 uds_init 之前建好，uds 只拿指针） ---- */
+    {
+        dtc_config_t dcfg;
+
+        bms_dtc_default_config(&dcfg);
+
+        if (dtc_init(&g_dtcs, &dcfg) != 0)
+        {
+            printf("dtc_init failed\n");
+            return 1;
+        }
+
+        dtc_set_snapshot_provider(&g_dtcs, snapshot_provider);
+
+        /*
+         * 上电即进入一个新的操作循环。
+         * 老化按「循环」计，不推进循环的话 confirmed 故障永远清不掉 ——
+         * 这一条在 dtc.h 里写了，但很容易漏。
+         */
+        dtc_operation_cycle(&g_dtcs);
+    }
+
     memset(&ucfg, 0, sizeof(ucfg));
     ucfg.dids = g_dids;
     ucfg.did_count = (uint16_t)(sizeof(g_dids) / sizeof(g_dids[0]));
+    ucfg.dtcs = &g_dtcs;
     uds_init(&srv, &ucfg);
 
     /* ---- BMS 模块 ---- */
@@ -357,6 +448,9 @@ int main(int argc, char **argv)
 
             bms_prot_step(&g_prot, &g_raw, &g_filt, dt);
 
+            /* 保护状态 -> 故障存储器。每轮都要调，见 bms_dtc.h */
+            bms_dtc_sync(&g_dtcs, g_prot.faults, (uint32_t)now);
+
             last_sample = now;
         }
 
@@ -410,7 +504,7 @@ int main(int argc, char **argv)
         {
             uint16_t len = 0;
 
-            if (isotp_recv(&tp, req, &len) == ISOTP_OK)
+            if (isotp_recv(&tp, req, sizeof(req), &len) == ISOTP_OK)
             {
                 int rlen = uds_handle_request(&srv, req, len, resp, sizeof(resp));
 
@@ -447,6 +541,27 @@ int main(int argc, char **argv)
     printf("[bms] final: soc=%d permille, state=%d, faults=0x%04X, trips=%u, corrections=%u\n",
            bms_soc_get(&g_soc), g_prot.state, g_prot.faults,
            (unsigned)g_prot.trips, (unsigned)g_soc.corrections);
+
+    /* 上电这几十秒里确认下来的故障，用 0x19 能读到的就是这些 */
+    {
+        uint16_t n = dtc_count_by_mask(&g_dtcs, DTC_STATUS_CONFIRMED);
+
+        printf("[bms] dtc stored: %u confirmed, %u total entries\n",
+               (unsigned)n, (unsigned)g_dtcs.count);
+
+        for (uint16_t i = 0; i < g_dtcs.count; i++)
+        {
+            const dtc_entry_t *e = dtc_get(&g_dtcs, i);
+
+            if (e == 0)
+                continue;
+
+            printf("[bms]   0x%06X %-28s status=0x%02X count=%u\n",
+                   (unsigned)e->code, dtc_name(&g_dtcs, e->code),
+                   e->status, e->occurrence);
+        }
+    }
+    fflush(stdout);
 
     can_driver_deinit(&can);
     return 0;

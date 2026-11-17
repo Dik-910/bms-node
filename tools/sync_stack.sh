@@ -10,7 +10,8 @@ DST=$(cd "$(dirname "$0")/.." && pwd)
 cp "$CAN/src/can/can_driver.h" "$CAN/src/can/can_driver.c" \
    "$CAN/src/can/can_driver_stub.c" "$CAN/src/can/can_driver_socketcan.c" "$DST/src/can/"
 cp "$CAN/src/net/isotp.h" "$CAN/src/net/isotp.c" "$DST/src/net/"
-cp "$CAN/src/uds/uds.h" "$CAN/src/uds/uds.c" "$DST/src/uds/"
+cp "$CAN/src/uds/uds.h" "$CAN/src/uds/uds.c" \
+   "$CAN/src/uds/dtc.h" "$CAN/src/uds/dtc.c" "$DST/src/uds/"
 cp "$CAN/src/app/node_health.h" "$CAN/src/app/node_health.c" "$DST/src/app/"
 
 SHA=$(git -C "$CAN" rev-parse --short HEAD)

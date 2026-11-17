@@ -1,7 +1,7 @@
 # 协议栈来源
 
 `src/can/`、`src/net/`、`src/uds/`、`src/app/node_health.*` 来自
-[can-node](https://github.com/Dik-910/can-node) 的 **8b329bb**，
+[can-node](https://github.com/Dik-910/can-node) 的 **af084b2**，
 未做修改，便于与本仓库的 BMS 业务层解耦。
 
 ## 为什么不抽成公共库

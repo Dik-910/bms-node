@@ -1,6 +1,7 @@
 # 构建产物
 *.o
 /node
-/test/bms_filter_test
-/test/bms_soc_test
-/test/bms_protect_test
+
+# 测试二进制。用通配而不是逐条列举：新增套件时不会漏
+/test/*_test
+!/test/*.c
